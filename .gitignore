@@ -1,0 +1,6 @@
+.venv/
+__pycache__/
+*.pyc
+ramer_local_cache.json
+ramer_local_usage.jsonl
+app_sessions.jsonl
