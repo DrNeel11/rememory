@@ -1,134 +1,95 @@
-# Ramer
+# ramer
 
-Ramer sits between the local coding/research agent you already use
-(Claude Code, Cline, aider, the `pi` CLI, anything that talks to Ollama
-natively or via an OpenAI-compatible endpoint) and Ollama itself. You
-point your agent tool at Ramer's port instead of Ollama's. Nothing
-about your workflow changes. Underneath, Ramer:
+ramer sits between the local coding/research tool you already use — claude code, cline, aider, pi, whatever — and ollama. you point your tool at ramer instead of ollama and just keep working. nothing else about your setup changes.
 
-- finds the GPU/CPU layer split that actually maximizes throughput for
-  each model at the context length you're using (Ollama's own default
-  is deliberately conservative and leaves real performance on the
-  table -- see "Validated results" below), and
-- arbitrates when more than one agent or model wants the same GPU at
-  once, instead of letting them independently thrash it.
+what it actually does: figures out how much of a model to put on your gpu vs your cpu for the context size you're running, and remembers that answer instead of making you re-tune it every time. if you've got more than one tool hitting the same gpu, it also stops them from kicking each other's models out of memory every few minutes, which is its own special kind of annoying.
 
-You don't run a probe or edit a config for each model. You install
-Ramer, point your existing tool's base URL at it, and keep working.
+i built this because i was sick of hand-tuning `num_gpu` every time I switched models or bumped the context window. figured other people running local models on a single consumer gpu are probably doing the same thing by hand, so here it is.
 
-## Status
+**the goal:** get more out of the gpu you already have without babysitting it.
 
-This is an early build going through real-world testing. If you're
-reading this because someone pointed you here: that's the point --
-unvarnished feedback, including "this is useless for what I actually
-do," is exactly what's being asked for. Reply to whoever sent you this
-link, or open an issue here.
+## status
 
-Every performance claim below is a real measurement on one real
-machine (RTX 5060, 8GB VRAM), independently verified where a task has
-a checkable outcome (git diff + pytest, not a model's self-report) --
-not a benchmark suite and not a general guarantee across hardware.
+early build, being tried by real people right now — if someone sent you this link, that's what's happening. i want the honest version, including "didn't help me at all." that's a useful answer too, not a failure.
 
-## Quick start
+every number below is from my own machine (rtx 5060, 8gb vram). it's real, it's just one machine. yours might look different and i'd genuinely like to know how.
 
-Requires Python 3.10+, a local Ollama install, and a **discrete NVIDIA
-GPU** (`nvidia-smi` on PATH). Built and tested on Windows; the
-discrete-GPU assumption should hold on Linux too, but that's untested.
-**Not applicable to Apple Silicon Macs** -- this optimizes the VRAM/RAM
-split across a PCIe bus, which unified memory doesn't have.
+## quick start
+
+you'll need python 3.10+, ollama installed, and a discrete nvidia gpu (`nvidia-smi` has to actually find something). built and tested on windows. linux should work — same logic, nothing windows-specific in it — but i haven't personally run it there yet, so treat that as untested rather than promised. won't work on apple silicon, since the whole point of this is splitting a model across separate vram and system ram, and unified memory doesn't have that split to make.
 
 ```bash
 pip install -r app/requirements.txt
 
-# start the proxy -- an existing agent tool points here instead of at Ollama
 python -m app.cli serve --port 11435
 ```
 
-Then point your agent tool's Ollama (or OpenAI-compatible) base URL at
-`http://127.0.0.1:11435` instead of Ollama's own `11434`. That's the
-whole integration -- no code changes on the tool's side. Confirmed
-working end-to-end with `aider` and with the `pi` CLI, including real
-tool-calling agentic tasks, not just chat.
+then point your tool's ollama base url at
 
-Optional, if you want to see or force a specific model's placement
-before using it live:
+```text
+http://127.0.0.1:11435
+```
+
+instead of the usual `11434`. that's it — no changes on your tool's end. i've run this through aider and pi myself, actual coding tasks where the agent is editing files and calling tools, not just chatting.
+
+if you want to poke at a model's placement yourself before trusting it live:
 
 ```bash
-python -m app.cli doctor                                    # hardware + Ollama status
+python -m app.cli doctor
 python -m app.cli benchmark qwen2.5:14b-instruct --num-ctx 8192
 ```
 
-A desktop GUI also exists (`python -m app.gui.main`) covering the same
-setup flow plus a built-in coding agent, for anyone who'd rather not
-use the CLI.
+there's a desktop gui too (`python -m app.gui.main`) if you'd rather not live in a terminal.
 
-## Validated results
+## what i've actually measured
 
-Same methodology throughout: compare against Ollama's own default
-placement, then re-run on a real agentic task with the outcome checked
-independently, not by trusting the model's or the agent's own report.
+comparing ollama's own default placement against what ramer finds, same model, same machine:
 
-| model | Ollama auto | Ramer | gain |
-|---|---|---|---|
-| Qwen2.5-14B (Q4_K_M) | 12.4 tok/s | 19.6 tok/s | +61% |
-| Qwen2.5-32B (Q2_K, VRAM boundary case) | 3.1 tok/s | 3.3 tok/s | +6.7% |
-| Qwen3.8-27B (IQ2_XXS) | 5.9 tok/s | 29.6 tok/s | +402% |
+| model | ollama | ramer | gain |
+|---|---:|---:|---:|
+| qwen2.5 14b q4 | 12.4 tok/s | 19.6 tok/s | +61% |
+| qwen2.5 32b q2 | 3.1 tok/s | 3.3 tok/s | +6.7% |
+| qwen3.8 27b iq2 | 5.9 tok/s | 29.6 tok/s | +402% |
 
-And on real end-to-end agent tasks through two different third-party
-tools (`aider`, `pi`), not synthetic benchmarks:
+and then the part that actually matters more — real tasks, not just raw token speed:
 
-| workload | with Ramer | without Ramer | takeaway |
-|---|---|---|---|
-| coding task, 14B | 55.4s, correct | 89.2s, correct | ~38% faster, same outcome |
-| coding task, 32B-Q2_K | fails | fails | placement can't rescue an inadequate model |
-| research task (web search + read), 14B | 19.8s median | 19.9s median | no benefit when network/tool latency dominates |
+running the same coding task through pi with the 14b model: 55.4s with ramer vs 89.2s without, both correct (checked with pytest after, not just taking the agent's word for it).
 
-**The honest, bounded thesis this points to**: Ramer's benefit is
-proportional to how much of a workload is actual local decoding. It's
-a real, repeated win for decode-heavy work (coding, long generations),
-negligible for short-answer/tool-latency-bound work, and it does not
-make an unreliable model reliable.
+tried the same thing with a 32b q2 model and honestly, neither run finished the task at all — turns out better placement can't fix a model that just isn't up to the job, it can only make a capable model faster.
 
-## How the placement is kept honest
+also tried a research task (search the web, read pages, answer). barely any difference with or without ramer, because almost all the time went to waiting on the network, not generating tokens.
 
-- **Context-aware**: a placement is only valid at the context window it
-  was measured at (the KV cache competes with model weights for the
-  same VRAM), so placements are probed and cached per model *and*
-  context length.
-- **Headroom-aware**: among candidates that tie on throughput, the
-  smallest VRAM footprint wins -- a placement that's 0.04 tok/s faster
-  but has zero headroom is a worse bet than one with margin to spare.
-- **Self-healing**: every run does a cheap pre-flight throughput check
-  against the cached number; if it's regressed, that run falls back to
-  Ollama's own safe auto-placement and the cache is flagged for a fresh
-  probe next time.
-- **Scheduled, not just placed**: a single chokepoint (`RamerScheduler`)
-  handles priority ordering and sticky same-model residency across
-  concurrent agents, so switching between two agents on one GPU doesn't
-  thrash.
+which is basically the honest summary:
 
-## What this doesn't do
+> ramer helps when local generation is actually the bottleneck. if you're mostly waiting on a website, a tool call, or a model too small for what you're asking of it, don't expect much from this.
 
-- **MoE expert-level placement.** Mixture-of-experts models have a
-  finer-grained placement lever (keep shared attention on GPU, route
-  individual experts to CPU) that `llama.cpp` supports directly but
-  Ollama's API doesn't expose. Confirmed by direct measurement; would
-  require driving a different backend, not tuning this tool harder.
-- **Rescue a model that's genuinely too large or too heavily quantized
-  for the task.** Placement optimizes what a model can already do; it
-  doesn't add capability. See the 32B-Q2_K rows above.
-- **Anything beyond Ollama as the actual inference engine.** The proxy
-  speaks Ollama's native API and the OpenAI-compatible chat API on top
-  of it, but Ollama itself still does the inference.
+## how it works, roughly
 
-## Repo layout
+- tries out different gpu/cpu splits per model and per context length (context size changes how much room is left for the model itself, so a split that's right at 4k can be wrong at 32k)
+- caches whatever split wins, so you're not re-probing every run
+- if two splits are close enough on speed, picks the one with more headroom left rather than the fastest by a hair
+- double-checks the cached split is still actually fast before trusting it, and quietly falls back to ollama's own safe default if something's regressed
+- when a couple of tools are sharing one gpu, keeps requests for the same model together instead of thrashing back and forth between models
 
-- `app/core/` -- hardware detection, placement engine, multi-agent
-  scheduler, the Ollama/OpenAI-compatible proxy server, a coding agent.
-- `app/gui/` -- the desktop GUI.
-- `app/cli.py` -- the CLI entry point (`serve`, `doctor`, `benchmark`).
-- `app/tests/` -- test suite (`pytest app/tests`).
+## what it doesn't do
 
-## License
+doesn't do expert-level placement for moe models yet — that needs lower-level control than ollama's api gives me access to.
 
-MIT, see `LICENSE`.
+can't turn a model that's genuinely too big or too compressed into something that works. it makes a capable model faster, it doesn't make an incapable one capable.
+
+ollama's still the thing actually running the model. ramer just sits in front of it and decides how the request gets handled.
+
+## repo
+
+```text
+app/core/    hardware detection, placement, scheduling, the proxy itself
+app/gui/     desktop interface
+app/cli.py   command line entry point
+app/tests/   tests
+```
+
+mostly this repo exists so people can run it on their own hardware and tell me straight whether it's actually useful. if it's not, i'd rather hear that than not.
+
+## license
+
+mit, see `LICENSE`.
